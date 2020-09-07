@@ -21,6 +21,26 @@ func main() {
 	//Create User data to pass to instance
 	data := []byte("#!/bin/bash\nsudo su\nyum update -y\nyum upgrade -y\nyum install httpd -y\nsystemctl start httpd\nsystemctl enable httpd\nchown ec2-user /var/www/*\nchown ec2-user /var/www")
 	userData := base64.StdEncoding.EncodeToString(data)
+
+	//Create Key pair
+	createKeyPairInput := &ec2.CreateKeyPairInput{
+		KeyName: aws.String("bkeys"),
+	}
+	fmt.Println("Creating key pair")
+	createKeyPairOutput, err := svc.CreateKeyPair(createKeyPairInput)
+	if err != nil {
+		log.Fatal(err)
+	}
+	err = svc.WaitUntilKeyPairExists(&ec2.DescribeKeyPairsInput{
+		KeyPairIds: []*string{
+			aws.String(*createKeyPairOutput.KeyPairId),
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println("Key-Pair has been created!")
+
 	// Create security group for our instances.
 	fmt.Println("Create SecurityGroup Input Structure")
 	securityGroupInput := &ec2.CreateSecurityGroupInput{
@@ -230,6 +250,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+
 	// Save volument ID and wait until volume is available
 	snapShotVolumeID := aws.String(*createVolumeOutput.VolumeId)
 	describeVolumeInput := &ec2.DescribeVolumesInput{
@@ -243,5 +264,91 @@ func main() {
 		log.Fatal(waitUntilVolumeComplete)
 	}
 	fmt.Println("Volume is ready!")
+
+	// Stop instance and unmount current volume
+	stopInstancesInput := &ec2.StopInstancesInput{
+		InstanceIds: []*string{
+			instanceID,
+		},
+	}
+
+	stopInstancesOutput, err := svc.StopInstances(stopInstancesInput)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println("Stopping Instance...")
+	err = svc.WaitUntilInstanceStopped(describeInstanceInput)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println("Instance has been stopped!")
+	fmt.Println(stopInstancesOutput.GoString())
+
+	// Detach the Volume from the instance
+	detachVolumeInput := &ec2.DetachVolumeInput{
+		VolumeId: instanceVolumeID,
+	}
+	fmt.Println("Detaching Volume...")
+	detachVolumeOutput, err := svc.DetachVolume(detachVolumeInput)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println(detachVolumeOutput.GoString())
+	err = svc.WaitUntilVolumeAvailable(&ec2.DescribeVolumesInput{
+		VolumeIds: []*string{
+			aws.String(*detachVolumeOutput.VolumeId),
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println("Volume has been detached.")
+
+	// Attach snapshot volume
+	attachVolumeInput := &ec2.AttachVolumeInput{
+		InstanceId: instanceID,
+		VolumeId:   snapShotVolumeID,
+		Device:     aws.String("/dev/xvda"),
+	}
+	attachVolumeOutput, err := svc.AttachVolume(attachVolumeInput)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println("Waiting for Volume to be attached")
+	err = svc.WaitUntilVolumeInUse(&ec2.DescribeVolumesInput{
+		VolumeIds: []*string{
+			snapShotVolumeID,
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println("Volume is now in use!")
+	fmt.Println(attachVolumeOutput.GoString())
+
+	// Start instance Up
+	startInstanceInput := &ec2.StartInstancesInput{
+		InstanceIds: []*string{
+			instanceID,
+		},
+	}
+	fmt.Println("Starting instance")
+	startInstanceOutput, err := svc.StartInstances(startInstanceInput)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println(*startInstanceOutput.StartingInstances[0].CurrentState.Name)
+	err = svc.WaitUntilInstanceRunning(describeInstanceInput)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println("Instance has been started!")
+
+	newIP, _ := svc.DescribeInstances(&ec2.DescribeInstancesInput{
+		InstanceIds: []*string{
+			instanceID,
+		},
+	})
+	fmt.Println(*newIP.Reservations[0].Instances[0].PublicIpAddress)
 
 }
