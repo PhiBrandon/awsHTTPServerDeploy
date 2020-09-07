@@ -160,6 +160,88 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Println(*describeInstanceOutput.Reservations[0].Instances[0].PublicIpAddress)
+
+	instancePublicIPAddress := *describeInstanceOutput.Reservations[0].Instances[0].PublicIpAddress
+	instanceVolumeID := aws.String(*describeInstanceOutput.Reservations[0].Instances[0].BlockDeviceMappings[0].Ebs.VolumeId)
+	instanceSubnet := aws.String(*describeInstanceOutput.Reservations[0].Instances[0].SubnetId)
+	fmt.Println(instancePublicIPAddress)
+	fmt.Println(instanceVolumeID)
+
+	// Get the Availability Zone to create snapshot later
+	describeSubnetInput := &ec2.DescribeSubnetsInput{
+		SubnetIds: []*string{
+			instanceSubnet,
+		},
+	}
+
+	describeSubnetOutput, err := svc.DescribeSubnets(describeSubnetInput)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Save the Availability Zone
+	instanceAZ := aws.String(*describeSubnetOutput.Subnets[0].AvailabilityZone)
+
+	// Create snapshot input to backup volume
+	createSnapShotInput := &ec2.CreateSnapshotInput{
+		Description: aws.String("HTTP Server Snapshot"),
+		VolumeId:    instanceVolumeID,
+		TagSpecifications: []*ec2.TagSpecification{
+			{
+				ResourceType: aws.String("snapshot"),
+				Tags: []*ec2.Tag{
+					{
+						Key:   aws.String("Name"),
+						Value: aws.String("SimpleHttpServerSnapShot"),
+					},
+				},
+			},
+		},
+	}
+
+	// Create snapshot
+	createSnapShotOutput, err := svc.CreateSnapshot(createSnapShotInput)
+	if err != nil {
+		log.Fatal(err)
+	}
+	snapShotID := aws.String(*createSnapShotOutput.SnapshotId)
+
+	// Wait for Snapshot to be completed creating
+	describeSnapshotsInput := &ec2.DescribeSnapshotsInput{
+		SnapshotIds: []*string{
+			snapShotID,
+		},
+	}
+
+	fmt.Println("Creating Snapshot...")
+	waitForSnapshotComplete := svc.WaitUntilSnapshotCompleted(describeSnapshotsInput)
+	if waitForSnapshotComplete != nil {
+		log.Fatal(waitForSnapshotComplete)
+	}
+	fmt.Println("Snapshot has been created.")
+
+	// Create new volume from snapshot
+	createVolumeInput := &ec2.CreateVolumeInput{
+		AvailabilityZone: instanceAZ,
+		SnapshotId:       snapShotID,
+	}
+
+	createVolumeOutput, err := svc.CreateVolume(createVolumeInput)
+	if err != nil {
+		log.Fatal(err)
+	}
+	// Save volument ID and wait until volume is available
+	snapShotVolumeID := aws.String(*createVolumeOutput.VolumeId)
+	describeVolumeInput := &ec2.DescribeVolumesInput{
+		VolumeIds: []*string{
+			snapShotVolumeID,
+		},
+	}
+	fmt.Println("Waiting for volume to be ready...")
+	waitUntilVolumeComplete := svc.WaitUntilVolumeAvailable(describeVolumeInput)
+	if waitUntilVolumeComplete != nil {
+		log.Fatal(waitUntilVolumeComplete)
+	}
+	fmt.Println("Volume is ready!")
 
 }
